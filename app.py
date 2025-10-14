@@ -1,6 +1,8 @@
 from redis_connect import MQTTWithRedis
 from api_alex_connect import Api
 import pandas as pd
+import time
+from datetime import datetime
 
 def datos_alex_proceso():
     url = 'http://192.168.252.6/serviciowebaccesonet/api/authentication/logintercero'
@@ -199,8 +201,61 @@ def match_alex_scada_paradas():
     df_matches['finParada_scada'] = pd.to_datetime(df_matches['finParada_scada'], errors='coerce')
 
     return df_matches.reset_index(drop=True)
+
 # ...existing code...
-print("Iniciando procesamiento de datos de Alex y SCADA...")
-df_resultado = match_alex_scada_paradas()
-print(f"Proceso completado. Se encontraron {len(df_resultado)} coincidencias.") 
-print(df_resultado)
+import os
+from openpyxl import Workbook, load_workbook
+
+def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "registro.xlsx", sheet_name: str = "registro"):
+    seen = set()
+    try:
+        while True:
+            df_matches = match_alex_scada_paradas()
+            if df_matches is None:
+                df_matches = pd.DataFrame()
+
+            rows = [tuple(r) for r in df_matches.itertuples(index=False, name=None)]
+            new_rows = [r for r in rows if r not in seen]
+
+            if new_rows:
+                for r in new_rows:
+                    seen.add(r)
+
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # preparar libro/hoja
+                if not os.path.exists(output_file):
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = sheet_name
+                else:
+                    wb = load_workbook(output_file)
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                    else:
+                        ws = wb.create_sheet(sheet_name)
+
+                # Escribir marca de tiempo
+                ws.append([f"--- Actualización: {ts} ---"])
+                # Escribir header
+                if not df_matches.empty:
+                    ws.append(list(df_matches.columns))
+                    # Escribir filas
+                    for r in df_matches.itertuples(index=False, name=None):
+                        # convertir valores tipo Timestamp a str para evitar problemas
+                        row_vals = [ (v.strftime("%Y-%m-%d %H:%M:%S") if hasattr(v, "strftime") else v) for v in r ]
+                        ws.append(row_vals)
+                else:
+                    ws.append(["No hay coincidencias en este ciclo."])
+
+                wb.save(output_file)
+                wb.close()
+
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("Monitor detenido por usuario.")
+    except Exception as e:
+        print(f"Monitor finalizado por error: {e}")
+
+if __name__ == "__main__":
+    monitor_match_and_log_excel(interval_seconds=5, output_file="registro.xlsx")
