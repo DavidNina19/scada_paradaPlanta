@@ -127,12 +127,21 @@ def match_alex_scada_paradas():
         a = df_matches['inicioParada_alex']
         s = df_matches['inicioParada']
         f = df_matches['finParada']
-        mask = (pd.notna(a)) & (
-            ((pd.notna(s) & pd.notna(f) & (a >= s) & (a <= f))) |
-            ((pd.notna(s) & pd.isna(f) & (a >= s)))
-        )
+
+        forty_min = pd.Timedelta(minutes=40)
+
+        within_range = pd.notna(a) & pd.notna(s) & pd.notna(f) & (a >= s) & (a <= f)
+        start_no_end = pd.notna(a) & pd.notna(s) & pd.isna(f) & (a >= s)
+        # nueva condición: a está dentro de +/- 40 minutos respecto a inicioParada (s)
+        near_start_40 = pd.notna(a) & pd.notna(s) & ((a - s).abs() <= forty_min)
+
+        mask = within_range | start_no_end | near_start_40
 
     df_filtered = df_matches[mask].copy()
+
+    # evitar aplicar la misma fila Alex varias veces por la misma máquina/inicio
+    if not df_filtered.empty and 'codMaquina' in df_filtered.columns and 'inicioParada_alex' in df_filtered.columns:
+        df_filtered = df_filtered.drop_duplicates(subset=['codMaquina', 'inicioParada_alex'], keep='first')
 
     # df_copy: copia del df_scada con las columnas out_cols; inicioParada_alex y desParada vacíos
     df_copy = df_scada.copy()
@@ -178,9 +187,10 @@ def match_alex_scada_paradas():
             ((pd.notna(df_copy['inicioParada']) & df_copy['finParada'].isna() & (a_inicio >= df_copy['inicioParada'])))
         )
 
-        # fallback: si no hay en_range, intentar emparejar por máquina y fecha/hora aproximada
+        # si no hay coincidencia exacta por rango, considerar cercanía de 40 min al inicioParada de scada
         if not in_range.any():
-            in_range = same_machine & pd.notna(df_copy['inicioParada']) & (a_inicio >= df_copy['inicioParada'])
+            forty_min = pd.Timedelta(minutes=40)
+            in_range = same_machine & pd.notna(df_copy['inicioParada']) & ((a_inicio - df_copy['inicioParada']).abs() <= forty_min)
 
         # asignar valores en las filas encontradas
         df_copy.loc[in_range, 'inicioParada_alex'] = a_inicio
@@ -220,14 +230,13 @@ def match_alex_scada_paradas():
 
     # devolver solo las columnas de salida (existentes)
     cols_to_return = [c for c in out_cols if c in df_copy.columns]
-    return df_copy[cols_to_return].reset_index(drop=True)
-    
+    return df_copy[cols_to_return].reset_index(drop=True)    
 
-def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "test4.xlsx", sheet_name: str = "test4"):
+def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "test5.xlsx", sheet_name: str = "test5"):
     seen = set()
     try:
         while True:
-            df_matches = match_alex_scada_paradas()
+            df_matches = matches_producto_alex_scada()
             if df_matches is None:
                 df_matches = pd.DataFrame()
 
@@ -264,19 +273,19 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "t
                     for v in r:
                         try:
                             if pd.isna(v):
-                                row_vals.append("")
+                                row_vals.append("SIN REGISTRO EN ERP")
                             elif hasattr(v, "strftime"):
                                 try:
                                     row_vals.append(v.strftime("%Y-%m-%d %H:%M:%S"))
                                 except Exception:
-                                    row_vals.append("")
+                                    row_vals.append("SIN REGISTRO EN ERP")
                             else:
                                 row_vals.append(v)
                         except Exception:
                             try:
                                 row_vals.append(str(v))
                             except Exception:
-                                row_vals.append("")
+                                row_vals.append("SIN REGISTRO EN ERP")
                     ws.append(row_vals)
 
                 wb.save(output_file)
@@ -290,85 +299,45 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "t
 
 def matches_producto_alex_scada():
     df_producto = datos_paradas_producto()
-    df_scada = datos_paradas_scada()
+    df_scada = match_alex_scada_paradas()
 
-    # columnas objetivo de salida
-    out_cols = [
-        'codMaquina', 'inicioParada_producto', 'desProducto', 'idProducto',
-        'inicioParada', 'finParada', 'horaParada', 'fecha', 'horaInicio', 'horaFin', 'turno'
-    ]
-
-    if df_producto is None or df_producto.empty or df_scada is None or df_scada.empty:
-        return pd.DataFrame(columns=out_cols)
-
-    # Queremos traer la descripción del orden (desOrden) desde df_producto
-    # Identificar columna id en ambos dataframes (buscando idNumOrd o variantes)
-    def find_id_col(df):
-        if df is None:
-            return None
-        for cand in ['idNumOrd', 'idnumord', 'idnumorden', 'idOrden', 'idorden', 'idProducto', 'id_prod', 'id']:
-            for c in df.columns:
-                if c.lower() == cand.lower():
-                    return c
-        # fallback: buscar columna que contenga 'idnum' o 'idord' o 'idproducto'
-        for c in df.columns:
-            low = c.lower()
-            if 'idnum' in low or 'idord' in low or 'idproducto' in low:
-                return c
-        return None
-
-    prod_id_col = find_id_col(df_producto)
-    scada_id_col = find_id_col(df_scada)
-
-    # identificar columna de descripción en producto (desOrden)
-    def find_des_col(df):
-        if df is None:
-            return None
-        candidates = ['desOrden', 'desorden', 'descripcion', 'desProducto', 'desProducto', 'descripcionProducto', 'des']
-        for cand in candidates:
-            for c in df.columns:
-                if c.lower() == cand.lower():
-                    return c
-        # fallback: buscar columna que contenga 'des' o 'desc' o 'descripcion'
-        for c in df.columns:
-            low = c.lower()
-            if 'des' in low or 'desc' in low or 'descripcion' in low:
-                return c
-        return None
-
-    prod_des_col = find_des_col(df_producto)
-
-    if prod_id_col is None or scada_id_col is None:
-        # no hay columnas id compatibles, devolver vacío con una columna desOrden si posible
-        if prod_des_col and prod_des_col in df_producto.columns:
-            return pd.DataFrame(columns=[prod_id_col or 'id', 'desOrden'])
+    if df_scada is None or df_scada.empty:
         return pd.DataFrame()
 
-    # preparar df_producto reducido con id y descripción (si existe)
-    if prod_des_col and prod_des_col in df_producto.columns:
-        prod_subset = df_producto[[prod_id_col, prod_des_col]].drop_duplicates(subset=[prod_id_col])
-        prod_subset = prod_subset.rename(columns={prod_id_col: 'id_lookup', prod_des_col: 'desOrden'})
+    # Normalizar idNumOrd en scada
+    if 'idNumOrd' in df_scada.columns:
+        df_scada['idNumOrd'] = df_scada['idNumOrd'].astype(str)
+    elif 'idNumOrden' in df_scada.columns:
+        df_scada['idNumOrd'] = df_scada['idNumOrden'].astype(str)
     else:
-        prod_subset = df_producto[[prod_id_col]].drop_duplicates(subset=[prod_id_col]).rename(columns={prod_id_col: 'id_lookup'})
+        df_scada['idNumOrd'] = pd.NA
 
-    # preparar scada para merge: ensure scada id col exists
-    df_scada_copy = df_scada.copy()
-    df_scada_copy = df_scada_copy.rename(columns={scada_id_col: 'id_lookup'})
+    # Si no hay producto, añadir columna vacía y devolver scada
+    if df_producto is None or df_producto.empty:
+        df_scada['desOrden'] = pd.NA
+        return df_scada.reset_index(drop=True)
 
-    # hacer merge left para traer desOrden al scada
-    df_merged = pd.merge(df_scada_copy, prod_subset, on='id_lookup', how='left')
+    prod = df_producto.copy()
+    # Normalizar idNumOrd en producto
+    if 'idNumOrd' in prod.columns:
+        prod['idNumOrd'] = prod['idNumOrd'].astype(str)
+    elif 'idNumOrden' in prod.columns:
+        prod['idNumOrd'] = prod['idNumOrden'].astype(str)
+    else:
+        prod['idNumOrd'] = pd.NA
 
-    # renombrar id column de vuelta si queremos conservar nombre original
-    # devolver dataframe con la columna desOrden agregada
-    return df_merged.reset_index(drop=True)
+    # Usamos directamente 'desOrden' según indicas (si no existe, crear vacía)
+    if 'desOrden' not in prod.columns:
+        df_scada['desOrden'] = pd.NA
+        return df_scada.reset_index(drop=True)
 
-if __name__ == "__main__":
-    df_matches = match_alex_scada_paradas()
-    print(df_matches)
-    #monitor_match_and_log_excel(interval_seconds=5, output_file="test4.xlsx")
-    #df_alex = extraer_datos_alex()
-    #df_scada = datos_paradas_scada()
-    #print("Datos Alex:")
-    #print(df_alex)
-    #print("\nDatos SCADA:")
-    #print(df_scada)
+    # Construir mapa idNumOrd -> desOrden (tomar primer valor por id)
+    prod_small = prod[['idNumOrd', 'desOrden']].dropna(subset=['idNumOrd'])
+    prod_small = prod_small.drop_duplicates(subset=['idNumOrd'], keep='first')
+    map_dict = pd.Series(prod_small['desOrden'].values, index=prod_small['idNumOrd']).to_dict()
+
+    # Mapear en df_scada (no cambia número de filas)
+    df_scada = df_scada.copy()
+    df_scada['desOrden'] = df_scada['idNumOrd'].map(map_dict)
+
+    return df_scada.reset_index(drop=True)

@@ -1,174 +1,87 @@
-from redis_connect import MQTTWithRedis
-from api_alex_connect import Api
-import pandas as pd
+from generate_data_parada import matches_producto_alex_scada
+from database import Database
 import time
 from datetime import datetime
-import re
-import os
-from openpyxl import Workbook, load_workbook
-#from datetime import timedelta
+import pandas as pd
 
+def monitor_and_insert_db(interval_seconds: int = 5, db_instance: Database = None):
+    """
+    Cada interval_seconds ejecuta matches_producto_alex_scada() y
+    para cada fila nueva llama a db_instance.process_data_paradas(...) con:
+    (codMaquina, inicioParada_alex, desParada, operario, idNumOrd,
+     inicioParada, finParada, horaParada, fecha, horaInicio, horaFin, turno, desOrden)
+    Evita duplicados en memoria.
+    """
+    if db_instance is None:
+        raise ValueError("Se requiere una instancia Database en db_instance")
 
-def datos_alex_proceso():
-    url = 'http://192.168.252.6/serviciowebaccesonet/api/authentication/logintercero'
-    filas = []
-    for i in range(1, 3):
-        urlMaquina = f'http://192.168.252.6/serviciowebtercerosnet/api/MaquinaOrdenParte/1'
-        api = Api(url, urlMaquina)
-        data = api.get_all_data()
-
-        if not data:
-            continue
-
-        import pandas as pd
-        # Normalizar distintos tipos de retorno
-        if isinstance(data, pd.DataFrame):
-            filas.extend(data.to_dict('records'))
-        elif isinstance(data, dict):
-            filas.append(data)
-        else:  # lista de dicts u otros iterables
-            try:
-                filas.extend(list(data))
-            except Exception:
-                filas.append(data)
-
-    if not filas:
-        return None
-
-    import pandas as pd
-    df = pd.DataFrame(filas)
-    return df
-
-def datos_paradas_scada():
-    paradaScada = MQTTWithRedis()
-    df = paradaScada.paradas_produccion()
-    return df
-
-def extraer_datos_alex():
-    df = datos_alex_proceso()
-    columnas_objetivo = ['codMaquina','idNumOrd', 'inicioParada', 'desParada', 'operario']
-    NOMBRE_COLUMNA_FECHA_FINAL = 'inicioParada_alex'
-
-    if df is None or df.empty:
-        cols_finales = [c if c != 'inicioParada' else NOMBRE_COLUMNA_FECHA_FINAL for c in columnas_objetivo]
-        return pd.DataFrame(columns=cols_finales)
-
-    # --- Lógica de mapeo de columnas omitida por brevedad, asume que mapea a 'columnas_objetivo' ---
-    # ... (Tu lógica de mapeo flexible aquí) ...
-    cols_map = {}
-    cols_lower = {c.lower(): c for c in df.columns}
-    for target in columnas_objetivo:
-        t_lower = target.lower()
-        if t_lower in cols_lower:
-            cols_map[target] = cols_lower[t_lower]
-            continue
-        candidates = [c for c in df.columns if t_lower in c.lower()]
-        cols_map[target] = candidates[0] if candidates else None
-
-    result = {}
-    for target, src in cols_map.items():
-        if src:
-            result[target] = df[src]
-        else:
-            result[target] = pd.Series([pd.NA] * len(df), index=df.index)
-
-    df_res = pd.DataFrame(result).reset_index(drop=True)
-
-    if 'inicioParada' in df_res.columns:
-        df_res['inicioParada'] = pd.to_datetime(df_res['inicioParada'], errors='coerce')
-    
-    if 'inicioParada' in df_res.columns:
-        df_res = df_res.rename(columns={'inicioParada': NOMBRE_COLUMNA_FECHA_FINAL})
-
-    return df_res
-
-def match_alex_scada_paradas():
-    df_alex = extraer_datos_alex()
-    df_scada = datos_paradas_scada()
-
-    # columnas objetivo de salida
-    out_cols = [
-        'codMaquina', 'inicioParada_alex', 'desParada', 'operario', 'idNumOrd',
-        'inicioParada', 'finParada', 'horaParada', 'fecha', 'horaInicio', 'horaFin', 'turno'
-    ]
-
-    if df_alex is None or df_alex.empty or df_scada is None or df_scada.empty:
-        return pd.DataFrame(columns=out_cols)
-    
-    df_matches = pd.merge(
-        df_alex,
-        df_scada,
-        on='codMaquina',  # La columna clave para la comparación
-        how='inner'       # Tipo de unión: 'inner' para encontrar la intersección (coincidencias)
-    )
-
-    # Asegurar formatos datetime para la comparación (no fallar si faltan columnas)
-    if 'inicioParada_alex' in df_matches.columns:
-        df_matches['inicioParada_alex'] = pd.to_datetime(df_matches['inicioParada_alex'], errors='coerce')
-    if 'inicioParada' in df_matches.columns:
-        df_matches['inicioParada'] = pd.to_datetime(df_matches['inicioParada'], errors='coerce')
-    if 'finParada' in df_matches.columns:
-        df_matches['finParada'] = pd.to_datetime(df_matches['finParada'], errors='coerce')
-
-    # aplicar el filtro booleano (inicioParada_alex entre inicioParada y finParada)
-    df_filtro = None
-    if {'inicioParada_alex', 'inicioParada', 'finParada'}.issubset(df_matches.columns):
-        df_filtro = (df_matches['inicioParada_alex'] >= df_matches['inicioParada']) & (df_matches['inicioParada_alex'] <= df_matches['finParada'])
-    else:
-        # si faltan columnas necesarias, no hay filas que coincidan
-        df_filtro = pd.Series([False] * len(df_matches), index=df_matches.index)
-
-    df_filtered = df_matches[df_filtro].copy()
-
-    # seleccionar solo las columnas objetivo que existan en el dataframe resultante
-    cols_to_return = [c for c in out_cols if c in df_filtered.columns]
-    if cols_to_return:
-        return df_filtered[cols_to_return].reset_index(drop=True)
-    return df_filtered.reset_index(drop=True)
-    
-
-def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "registro_app.xlsx", sheet_name: str = "registro_app"):
     seen = set()
     try:
         while True:
-            df_matches = match_alex_scada_paradas()
-            if df_matches is None:
-                df_matches = pd.DataFrame()
+            df = matches_producto_alex_scada()
+            if df is None or df.empty:
+                time.sleep(interval_seconds)
+                continue
 
-            rows = [tuple(r) for r in df_matches.itertuples(index=False, name=None)]
-            new_rows = [r for r in rows if r not in seen]
+            # Normalizar nombres de columna mínimos (si existen variantes)
+            df = df.copy()
+            # asegurar columnas que usaremos, si faltan rellenar con None
+            cols_needed = [
+                'codMaquina', 'inicioParada_alex', 'desParada', 'operario', 'idNumOrd',
+                'inicioParada', 'finParada', 'horaParada', 'fecha', 'horaInicio', 'horaFin', 'turno', 'desOrden'
+            ]
+            for c in cols_needed:
+                if c not in df.columns:
+                    df[c] = pd.NA
 
-            if new_rows:
-                for r in new_rows:
-                    seen.add(r)
+            # convertir tiempos a datetime (si corresponde)
+            for tcol in ['inicioParada_alex', 'inicioParada', 'finParada']:
+                df[tcol] = pd.to_datetime(df[tcol], errors='coerce')
 
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # iterar filas y enviar a BD solo si no están en seen
+            for row in df.itertuples(index=False, name=None):
+                # crear tupla identificadora (puedes ajustar campos)
+                # uso (codMaquina, inicioParada_alex, idNumOrd) como identificador
+                codMaquina = row[df.columns.get_loc('codMaquina')]
+                inicioParada_alex = row[df.columns.get_loc('inicioParada_alex')]
+                idNumOrd = row[df.columns.get_loc('idNumOrd')]
 
-                # preparar libro/hoja
-                if not os.path.exists(output_file):
-                    wb = Workbook()
-                    ws = wb.active
-                    ws.title = sheet_name
-                else:
-                    wb = load_workbook(output_file)
-                    if sheet_name in wb.sheetnames:
-                        ws = wb[sheet_name]
-                    else:
-                        ws = wb.create_sheet(sheet_name)
+                key = (str(codMaquina), 
+                       pd.NaT if pd.isna(inicioParada_alex) else pd.Timestamp(inicioParada_alex).to_pydatetime(),
+                       str(idNumOrd) if not pd.isna(idNumOrd) else '')
 
-                # Escribir header
-                if not df_matches.empty:
-                    ws.append(list(df_matches.columns))
-                    # Escribir filas
-                    for r in df_matches.itertuples(index=False, name=None):
-                        # convertir valores tipo Timestamp a str para evitar problemas
-                        row_vals = [ (v.strftime("%Y-%m-%d %H:%M:%S") if hasattr(v, "strftime") else v) for v in r ]
-                        ws.append(row_vals)
-                else:
-                    ws.append(["No hay coincidencias en este ciclo."])
+                if key in seen:
+                    continue
 
-                wb.save(output_file)
-                wb.close()
+                # preparar valores en el orden esperado (con fallback a None)
+                def val(col):
+                    v = row[df.columns.get_loc(col)]
+                    return None if pd.isna(v) else v
+
+                inicio_db = val('inicioParada_alex')
+                desParada_db = val('desParada')
+                operario_db = val('operario')
+                idNumOrd_db = val('idNumOrd')
+                inicioParada_db = val('inicioParada')
+                finParada_db = val('finParada')
+                horaParada_db = val('horaParada')
+                fecha_db = val('fecha')
+                horaInicio_db = val('horaInicio')
+                horaFin_db = val('horaFin')
+                turno_db = val('turno')
+                desOrden_db = val('desOrden')
+
+                # Llamar al método de inserción
+                try:
+                    ok = db_instance.process_data_paradas(
+                        codMaquina, inicio_db, desParada_db, operario_db, idNumOrd_db,
+                        inicioParada_db, finParada_db, horaParada_db, fecha_db, horaInicio_db,
+                        horaFin_db, turno_db, desOrden_db
+                    )
+                    if ok:
+                        seen.add(key)
+                except Exception as e:
+                    print(f"Error insertando fila {key}: {e}")
 
             time.sleep(interval_seconds)
     except KeyboardInterrupt:
@@ -177,12 +90,5 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "r
         print(f"Monitor finalizado por error: {e}")
 
 if __name__ == "__main__":
-    df_matches = match_alex_scada_paradas()
-    print(df_matches)
-    monitor_match_and_log_excel(interval_seconds=5, output_file="registro_app.xlsx")
-    #df_alex = extraer_datos_alex()
-    #df_scada = datos_paradas_scada()
-    #print("Datos Alex:")
-    #print(df_alex)
-    #print("\nDatos SCADA:")
-    #print(df_scada)
+    db = Database()  # usa tu constructor ya configurado
+    monitor_and_insert_db(interval_seconds=5, db_instance=db)

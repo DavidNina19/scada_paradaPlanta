@@ -281,7 +281,7 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "t
 if __name__ == "__main__":
     df_matches = match_alex_scada_paradas()
     print(df_matches)
-    monitor_match_and_log_excel(interval_seconds=5, output_file="test4.xlsx")
+    #monitor_match_and_log_excel(interval_seconds=5, output_file="test4.xlsx")
     #df_alex = extraer_datos_alex()
     #df_scada = datos_paradas_scada()
     #print("Datos Alex:")
