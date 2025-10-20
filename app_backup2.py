@@ -13,7 +13,7 @@ def datos_alex_proceso():
     url = 'http://192.168.252.6/serviciowebaccesonet/api/authentication/logintercero'
     filas = []
     for i in range(1, 3):
-        urlMaquina = f'http://192.168.252.6/serviciowebtercerosnet/api/MaquinaOrdenParte/1'
+        urlMaquina = f'http://192.168.252.6/serviciowebtercerosnet/api/MaquinaOrdenParte/{i}'
         api = Api(url, urlMaquina)
         data = api.get_all_data()
 
@@ -96,38 +96,15 @@ def match_alex_scada_paradas():
         return pd.DataFrame(columns=out_cols)
     
     df_matches = pd.merge(
-        df_alex,
-        df_scada,
-        on='codMaquina',  # La columna clave para la comparación
-        how='inner'       # Tipo de unión: 'inner' para encontrar la intersección (coincidencias)
+    df_alex, 
+    df_scada, 
+    on='codMaquina', # La columna clave para la comparación
+    how='inner'      # Tipo de unión: 'inner' para encontrar la intersección (coincidencias)
     )
-
-    # Asegurar formatos datetime para la comparación (no fallar si faltan columnas)
-    if 'inicioParada_alex' in df_matches.columns:
-        df_matches['inicioParada_alex'] = pd.to_datetime(df_matches['inicioParada_alex'], errors='coerce')
-    if 'inicioParada' in df_matches.columns:
-        df_matches['inicioParada'] = pd.to_datetime(df_matches['inicioParada'], errors='coerce')
-    if 'finParada' in df_matches.columns:
-        df_matches['finParada'] = pd.to_datetime(df_matches['finParada'], errors='coerce')
-
-    # aplicar el filtro booleano (inicioParada_alex entre inicioParada y finParada)
-    df_filtro = None
-    if {'inicioParada_alex', 'inicioParada', 'finParada'}.issubset(df_matches.columns):
-        df_filtro = (df_matches['inicioParada_alex'] >= df_matches['inicioParada']) & (df_matches['inicioParada_alex'] <= df_matches['finParada'])
-    else:
-        # si faltan columnas necesarias, no hay filas que coincidan
-        df_filtro = pd.Series([False] * len(df_matches), index=df_matches.index)
-
-    df_filtered = df_matches[df_filtro].copy()
-
-    # seleccionar solo las columnas objetivo que existan en el dataframe resultante
-    cols_to_return = [c for c in out_cols if c in df_filtered.columns]
-    if cols_to_return:
-        return df_filtered[cols_to_return].reset_index(drop=True)
-    return df_filtered.reset_index(drop=True)
+    return df_matches[out_cols]
     
 
-def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "registro_app.xlsx", sheet_name: str = "registro_app"):
+def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "registro_app2.xlsx", sheet_name: str = "registro_app2"):
     seen = set()
     try:
         while True:
@@ -139,33 +116,49 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "r
             new_rows = [r for r in rows if r not in seen]
 
             if new_rows:
+                # marcar filas nuevas como vistas
                 for r in new_rows:
                     seen.add(r)
-
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 # preparar libro/hoja
                 if not os.path.exists(output_file):
                     wb = Workbook()
                     ws = wb.active
                     ws.title = sheet_name
+                    write_header = True
                 else:
                     wb = load_workbook(output_file)
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
                     else:
                         ws = wb.create_sheet(sheet_name)
+                    # si la hoja está vacía (sin filas), escribimos encabezado
+                    write_header = (ws.max_row == 0)
 
-                # Escribir header
-                if not df_matches.empty:
+                # Escribir header solo si se creó el archivo/hoja o está vacío
+                if write_header and not df_matches.empty:
                     ws.append(list(df_matches.columns))
-                    # Escribir filas
-                    for r in df_matches.itertuples(index=False, name=None):
-                        # convertir valores tipo Timestamp a str para evitar problemas
-                        row_vals = [ (v.strftime("%Y-%m-%d %H:%M:%S") if hasattr(v, "strftime") else v) for v in r ]
-                        ws.append(row_vals)
-                else:
-                    ws.append(["No hay coincidencias en este ciclo."])
+
+                # Escribir únicamente las filas nuevas (new_rows)
+                for r in new_rows:
+                    row_vals = []
+                    for v in r:
+                        try:
+                            if pd.isna(v):
+                                row_vals.append("")
+                            elif hasattr(v, "strftime"):
+                                try:
+                                    row_vals.append(v.strftime("%Y-%m-%d %H:%M:%S"))
+                                except Exception:
+                                    row_vals.append("")
+                            else:
+                                row_vals.append(v)
+                        except Exception:
+                            try:
+                                row_vals.append(str(v))
+                            except Exception:
+                                row_vals.append("")
+                    ws.append(row_vals)
 
                 wb.save(output_file)
                 wb.close()
@@ -179,7 +172,7 @@ def monitor_match_and_log_excel(interval_seconds: int = 5, output_file: str = "r
 if __name__ == "__main__":
     df_matches = match_alex_scada_paradas()
     print(df_matches)
-    monitor_match_and_log_excel(interval_seconds=5, output_file="registro_app.xlsx")
+    monitor_match_and_log_excel(interval_seconds=5, output_file="registro_app2.xlsx")
     #df_alex = extraer_datos_alex()
     #df_scada = datos_paradas_scada()
     #print("Datos Alex:")
