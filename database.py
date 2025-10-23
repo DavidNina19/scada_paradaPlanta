@@ -126,7 +126,7 @@ class Database:
             )
             
             self.cursor.execute(query, data_to_insert)
-
+            self.connection.commit()
             print(f"✅ Insertado en '{table_name}' la máquina: {codMaquina}")
             return True
         except Exception as e:

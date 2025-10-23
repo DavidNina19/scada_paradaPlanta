@@ -133,7 +133,7 @@ def match_alex_scada_paradas():
         within_range = pd.notna(a) & pd.notna(s) & pd.notna(f) & (a >= s) & (a <= f)
         start_no_end = pd.notna(a) & pd.notna(s) & pd.isna(f) & (a >= s)
         # nueva condición: a está dentro de +/- 40 minutos respecto a inicioParada (s)
-        near_start_40 = pd.notna(a) & pd.notna(s) & ((a - s).abs() <= forty_min)
+        near_start_40 = pd.notna(a) & pd.notna(s) & (a <= s) & ((a - s).abs() <= forty_min)
 
         mask = within_range | start_no_end | near_start_40
 

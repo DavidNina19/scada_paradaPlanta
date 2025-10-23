@@ -42,15 +42,39 @@ def monitor_and_insert_db(interval_seconds: int = 5, db_instance: Database = Non
             for row in df.itertuples(index=False, name=None):
                 # crear tupla identificadora (puedes ajustar campos)
                 # uso (codMaquina, inicioParada_alex, idNumOrd) como identificador
-                codMaquina = row[df.columns.get_loc('codMaquina')]
-                inicioParada_alex = row[df.columns.get_loc('inicioParada_alex')]
-                idNumOrd = row[df.columns.get_loc('idNumOrd')]
+                # construir clave estable basada en campos SCADA (no incluir idNumOrd/operario
+                # porque estos se rellenan posteriormente y harían que filas antiguas parezcan nuevas)
+                try:
+                    cod_val = row[df.columns.get_loc('codMaquina')]
+                except Exception:
+                    cod_val = ''
+                try:
+                    scada_inicio = row[df.columns.get_loc('inicioParada')]
+                except Exception:
+                    scada_inicio = None
+                try:
+                    scada_fin = row[df.columns.get_loc('finParada')]
+                except Exception:
+                    scada_fin = None
 
-                key = (str(codMaquina), 
-                       pd.NaT if pd.isna(inicioParada_alex) else pd.Timestamp(inicioParada_alex).to_pydatetime(),
-                       str(idNumOrd) if not pd.isna(idNumOrd) else '')
+                def fmt(dt):
+                    try:
+                        if pd.isna(dt):
+                            return ''
+                        if hasattr(dt, 'strftime'):
+                            return dt.strftime('%Y-%m-%d %H:%M:%S')
+                        return str(dt)
+                    except Exception:
+                        return str(dt)
+
+                key = (str(cod_val), fmt(scada_inicio), fmt(scada_fin))
 
                 if key in seen:
+                    # debug: indicar por qué se omite
+                    try:
+                        print(f"Skipping already-seen row (key): {key}")
+                    except Exception:
+                        print("Skipping already-seen row (key) - (could not stringify key)")
                     continue
 
                 # preparar valores en el orden esperado (con fallback a None)
@@ -71,8 +95,13 @@ def monitor_and_insert_db(interval_seconds: int = 5, db_instance: Database = Non
                 turno_db = val('turno')
                 desOrden_db = val('desOrden')
 
+                # extraer codMaquina (se usa en el mensaje y para la clave de seen)
+                codMaquina = val('codMaquina')
+
                 # Llamar al método de inserción
                 try:
+                    # debug: mostrar intento de inserción
+                    print(f"Attempting insert for machine={codMaquina}, id={idNumOrd_db}, inicio_alex={inicio_db}")
                     ok = db_instance.process_data_paradas(
                         codMaquina, inicio_db, desParada_db, operario_db, idNumOrd_db,
                         inicioParada_db, finParada_db, horaParada_db, fecha_db, horaInicio_db,
@@ -80,6 +109,8 @@ def monitor_and_insert_db(interval_seconds: int = 5, db_instance: Database = Non
                     )
                     if ok:
                         seen.add(key)
+                    else:
+                        print(f"Insert returned False for key={key}")
                 except Exception as e:
                     print(f"Error insertando fila {key}: {e}")
 
